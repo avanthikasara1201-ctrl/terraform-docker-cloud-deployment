@@ -88,8 +88,8 @@ pipeline {
                             'set -e',
                             'aws ecr get-login-password --region us-west-1 | docker login --username AWS --password-stdin 075810104101.dkr.ecr.us-west-1.amazonaws.com',
                             'docker pull 075810104101.dkr.ecr.us-west-1.amazonaws.com/my-cloud-website:latest',
-                            'docker rm -f my-cloud-website || true',
-                            'docker run -d --name my-cloud-website --restart unless-stopped -p 80:80 075810104101.dkr.ecr.us-west-1.amazonaws.com/my-cloud-website:latest'
+                            'docker rm -f myterraform-web my-cloud-website || true',
+                            'docker run -d --name myterraform-web --restart unless-stopped -p 80:80 075810104101.dkr.ecr.us-west-1.amazonaws.com/my-cloud-website:latest'
                         ]
 
                         def parameters = groovy.json.JsonOutput.toJson([
