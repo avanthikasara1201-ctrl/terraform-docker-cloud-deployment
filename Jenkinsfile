@@ -3,131 +3,138 @@ pipeline {
     agent any
 
     environment {
-        AWS_REGION = 'us-west-1'
-        ECR_REGISTRY = '075810104101.dkr.ecr.us-west-1.amazonaws.com'
+        AWS_DEFAULT_REGION = 'us-west-1'
+        AWS_ACCOUNT_ID = '075810104101'
         ECR_REPOSITORY = 'my-cloud-website'
-        EC2_INSTANCE_ID = 'i-01789d5a178b689bc'
+        EC2_INSTANCE_ID = 'i-0eb49e386966afd20'
+        IMAGE_URI = '075810104101.dkr.ecr.us-west-1.amazonaws.com/my-cloud-website'
     }
 
     stages {
-        stage('Checkout Source') {
+        stage('Checkout') {
             steps {
                 checkout scm
             }
         }
 
-        stage('Check Tools') {
+        stage('Build Docker Image') {
             steps {
                 sh '''
-                    docker --version
-                    aws --version
-                '''
-            }
-        }
-
-        stage('Build Website Image') {
-            steps {
-                sh '''
+                    set -e
+                    echo "Building Docker image..."
                     docker build -t my-cloud-website:${BUILD_NUMBER} .
+                    docker tag my-cloud-website:${BUILD_NUMBER} ${IMAGE_URI}:${BUILD_NUMBER}
+                    docker tag my-cloud-website:${BUILD_NUMBER} ${IMAGE_URI}:latest
                 '''
             }
         }
 
-        stage('Verify Image') {
+        stage('Verify Docker Image') {
             steps {
                 sh '''
-                    docker image inspect my-cloud-website:${BUILD_NUMBER}
+                    set -e
+                    echo "Verifying Docker image..."
+                    docker image inspect ${IMAGE_URI}:${BUILD_NUMBER}
                 '''
             }
         }
 
         stage('Push Image to Amazon ECR') {
             steps {
-                withCredentials([
-                    usernamePassword(
-                        credentialsId: 'aws-ecr-credentials',
-                        usernameVariable: 'AWS_ACCESS_KEY_ID',
-                        passwordVariable: 'AWS_SECRET_ACCESS_KEY'
-                    )
-                ]) {
-                    sh '''
-                        set -eu
+                sh '''
+                    set -e
 
-                        export AWS_DEFAULT_REGION="$AWS_REGION"
+                    echo "Logging in to Amazon ECR..."
+                    aws ecr get-login-password --region "$AWS_DEFAULT_REGION" \
+                      | docker login \
+                        --username AWS \
+                        --password-stdin \
+                        "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
 
-                        aws ecr get-login-password --region "$AWS_REGION" |
-                            docker login --username AWS --password-stdin "$ECR_REGISTRY"
+                    echo "Pushing versioned image..."
+                    docker push "${IMAGE_URI}:${BUILD_NUMBER}"
 
-                        docker tag my-cloud-website:${BUILD_NUMBER} \
-                            "$ECR_REGISTRY/$ECR_REPOSITORY:${BUILD_NUMBER}"
-
-                        docker push "$ECR_REGISTRY/$ECR_REPOSITORY:${BUILD_NUMBER}"
-
-                        docker tag my-cloud-website:${BUILD_NUMBER} \
-                            "$ECR_REGISTRY/$ECR_REPOSITORY:latest"
-
-                        docker push "$ECR_REGISTRY/$ECR_REPOSITORY:latest"
-
-                        docker logout "$ECR_REGISTRY"
-                    '''
-                }
+                    echo "Pushing latest image..."
+                    docker push "${IMAGE_URI}:latest"
+                '''
             }
         }
 
         stage('Deploy to EC2 using SSM') {
             steps {
-                withCredentials([
-                    usernamePassword(
-                        credentialsId: 'aws-ecr-credentials',
-                        usernameVariable: 'AWS_ACCESS_KEY_ID',
-                        passwordVariable: 'AWS_SECRET_ACCESS_KEY'
-                    )
-                ]) {
-                    script {
-                        def commands = [
-                            'set -e',
-                            'aws ecr get-login-password --region us-west-1 | docker login --username AWS --password-stdin 075810104101.dkr.ecr.us-west-1.amazonaws.com',
-                            'docker pull 075810104101.dkr.ecr.us-west-1.amazonaws.com/my-cloud-website:latest',
-                            'docker rm -f myterraform-web my-cloud-website || true',
-                            'docker run -d --name myterraform-web --restart unless-stopped -p 80:80 075810104101.dkr.ecr.us-west-1.amazonaws.com/my-cloud-website:latest'
-                        ]
+                sh '''
+                    set -eu
 
-                        def parameters = groovy.json.JsonOutput.toJson([
-                            commands: commands
-                        ])
+                    echo "Sending deployment command to EC2..."
 
-                        withEnv(["SSM_PARAMETERS=${parameters}"]) {
-                            sh '''
-                                set -eu
-                                export AWS_DEFAULT_REGION="$AWS_REGION"
+                    COMMAND_ID=$(aws ssm send-command \
+                        --region "$AWS_DEFAULT_REGION" \
+                        --instance-ids "$EC2_INSTANCE_ID" \
+                        --document-name "AWS-RunShellScript" \
+                        --comment "Deploy website from Jenkins build $BUILD_NUMBER" \
+                        --parameters "commands=[
+                          \\"set -e\\",
+                          \\"aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $IMAGE_URI\\",
+                          \\"docker pull $IMAGE_URI:latest\\",
+                          \\"docker rm -f myterraform-web || true\\",
+                          \\"docker run -d --name myterraform-web --restart unless-stopped -p 80:80 $IMAGE_URI:latest\\"
+                        ]" \
+                        --query 'Command.CommandId' \
+                        --output text)
 
-                                COMMAND_ID=$(aws ssm send-command \
-                                    --region "$AWS_REGION" \
-                                    --instance-ids i-0eb49e386966afd20
-                                    --document-name "AWS-RunShellScript" \
-                                    --comment "Deploy website from Jenkins build ${BUILD_NUMBER}" \
-                                    --parameters "$SSM_PARAMETERS" \
-                                    --query 'Command.CommandId' \
-                                    --output text)
+                    echo "SSM Command ID: $COMMAND_ID"
+                    echo "Waiting for deployment..."
 
-                                echo "SSM command ID: $COMMAND_ID"
+                    ATTEMPT=0
 
-                                aws ssm wait command-executed \
-                                    --region "$AWS_REGION" \
-                                    --command-id "$COMMAND_ID" \
-                                    --instance-id "$EC2_INSTANCE_ID"
+                    while [ "$ATTEMPT" -lt 30 ]; do
+                        STATUS=$(aws ssm get-command-invocation \
+                            --region "$AWS_DEFAULT_REGION" \
+                            --command-id "$COMMAND_ID" \
+                            --instance-id "$EC2_INSTANCE_ID" \
+                            --query 'Status' \
+                            --output text 2>/dev/null || true)
 
+                        echo "Deployment status: $STATUS"
+
+                        case "$STATUS" in
+                            Success)
+                                echo "Deployment completed successfully!"
+                                exit 0
+                                ;;
+                            Failed|Cancelled|TimedOut)
+                                echo "Deployment failed. Fetching details..."
                                 aws ssm get-command-invocation \
-                                    --region "$AWS_REGION" \
+                                    --region "$AWS_DEFAULT_REGION" \
                                     --command-id "$COMMAND_ID" \
                                     --instance-id "$EC2_INSTANCE_ID" \
-                                    --query 'StandardOutputContent' \
-                                    --output text
-                            '''
-                        }
-                    }
-                }
+                                    --output json || true
+                                exit 1
+                                ;;
+                        esac
+
+                        ATTEMPT=$((ATTEMPT + 1))
+                        sleep 5
+                    done
+
+                    echo "Timed out waiting for deployment."
+                    exit 1
+                '''
             }
+        }
+    }
+
+    post {
+        success {
+            echo 'Pipeline completed successfully. Check the website in your browser.'
+        }
+
+        failure {
+            echo 'Pipeline failed. Check Console Output for the failing stage.'
+        }
+
+        always {
+            echo 'Jenkins pipeline execution finished.'
         }
     }
 }
