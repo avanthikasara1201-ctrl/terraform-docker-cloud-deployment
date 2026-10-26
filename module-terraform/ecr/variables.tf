@@ -1,6 +1,5 @@
-
 variable "repository_name" {
-  description = "Name of the ECR repository"
+  description = "Name of the existing Amazon ECR repository"
   type        = string
-  default     = "myterraform-web"
+  default     = "my-cloud-website"
 }

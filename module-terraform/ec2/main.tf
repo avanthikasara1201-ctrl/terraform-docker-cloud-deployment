@@ -4,16 +4,6 @@ resource "aws_security_group" "ec2" {
   description = "Security group for myterraform EC2"
   vpc_id      = var.vpc_id
 
-  # Allow SSH from your IP only
-  ingress {
-    description = "SSH from my IP only"
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = ["157.51.117.46/32"]
-  }
-
-  # Allow HTTP website traffic
   ingress {
     description = "HTTP"
     from_port   = 80
@@ -22,7 +12,14 @@ resource "aws_security_group" "ec2" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  # Allow outbound traffic
+  ingress {
+    description = "SSH from my IP only"
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["152.57.86.122/32"]
+  }
+
   egress {
     from_port   = 0
     to_port     = 0
@@ -35,7 +32,6 @@ resource "aws_security_group" "ec2" {
   }
 }
 
-# Find the latest Amazon Linux 2023 AMI
 data "aws_ami" "amazon_linux" {
   most_recent = true
   owners      = ["amazon"]
@@ -51,7 +47,6 @@ data "aws_ami" "amazon_linux" {
   }
 }
 
-# EC2 Instance
 resource "aws_instance" "web" {
   ami                    = data.aws_ami.amazon_linux.id
   instance_type          = "t3.micro"
@@ -61,13 +56,25 @@ resource "aws_instance" "web" {
   associate_public_ip_address = true
   key_name                    = "myterraform-key"
 
-  # Install Docker and launch an Nginx website automatically
+  iam_instance_profile = var.instance_profile_name
+
   user_data = <<-EOF
     #!/bin/bash
-    dnf update -y
-    dnf install -y docker
+    set -euxo pipefail
+
+    dnf install -y docker awscli
     systemctl enable --now docker
-    docker run -d --name myterraform-web -p 80:80 --restart unless-stopped nginx:latest
+
+    aws ecr get-login-password --region us-west-1 \
+      | docker login --username AWS --password-stdin 075810104101.dkr.ecr.us-west-1.amazonaws.com
+
+    docker pull 075810104101.dkr.ecr.us-west-1.amazonaws.com/my-cloud-website:latest
+
+    docker run -d \
+      --name myterraform-web \
+      -p 80:80 \
+      --restart unless-stopped \
+      075810104101.dkr.ecr.us-west-1.amazonaws.com/my-cloud-website:latest
   EOF
 
   tags = {
