@@ -24,3 +24,7 @@ credentials
 .DS_Store
 Thumbs.db
 .vscode/
+
+# Local backup and Terraform plan files
+jenkins_home_backup.tar.gz
+tfplan
