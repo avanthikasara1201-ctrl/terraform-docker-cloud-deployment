@@ -103,7 +103,7 @@ pipeline {
 
                                 COMMAND_ID=$(aws ssm send-command \
                                     --region "$AWS_REGION" \
-                                    --instance-ids "$EC2_INSTANCE_ID" \
+                                    --instance-ids i-0eb49e386966afd20
                                     --document-name "AWS-RunShellScript" \
                                     --comment "Deploy website from Jenkins build ${BUILD_NUMBER}" \
                                     --parameters "$SSM_PARAMETERS" \
